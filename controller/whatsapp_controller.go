@@ -33,7 +33,7 @@ func NewWhatsAppController(whatsappService *service.WhatsAppService, slackServic
 // RegisterRoutes registers the controller's routes on the given mux
 func (c *WhatsAppController) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /send-message", c.HandleSendMessage)
-	mux.HandleFunc("GET /qr", c.HandleGetQR)
+	mux.HandleFunc("POST /qr", c.HandleGetQR)
 	mux.HandleFunc("GET /messages", c.HandleGetMessages)
 }
 
@@ -64,23 +64,23 @@ func (c *WhatsAppController) HandleGetQR(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Send to Slack when configured (chat.postMessage + catbox for image URL)
+	// Send to Slack when configured: respond immediately, upload in background
 	if c.slackService != nil {
 		png, pngErr := q.PNG(256)
 		if pngErr != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"status": "error", "message": "Failed to generate QR image"})
 			return
 		}
-		if sendErr := c.slackService.SendQRImage(png); sendErr != nil {
-			log.Printf("Slack upload failed: %v", sendErr)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"status":  "pairing",
-				"message": "Slack upload failed: " + sendErr.Error(),
-				"code":    code,
-			})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{"status": "pairing", "message": "QR sent to Slack"})
+		// Respond immediately with plain text so Slack shows a normal message
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("Enviando QR a Slack..."))
+		go func() {
+			if sendErr := c.slackService.SendQRImage(png); sendErr != nil {
+				log.Printf("Slack upload failed: %v", sendErr)
+			} else {
+				log.Printf("QR sent to Slack successfully")
+			}
+		}()
 		return
 	}
 

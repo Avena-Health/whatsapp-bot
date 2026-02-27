@@ -1,0 +1,6 @@
+store.db
+*.db
+.env
+.git
+.gitignore
+*.md

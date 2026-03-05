@@ -29,11 +29,11 @@ type WhatsAppService struct {
 	groups   map[string]string
 	groupsMu *sync.RWMutex
 
-	qrCode   string
-	qrMu     sync.RWMutex
-	needsQR  bool
+	qrCode  string
+	qrMu    sync.RWMutex
+	needsQR bool
 
-	avenaDao dao.AvenaDao              // optional: sends group_join records to Avena webhook
+	avenaDao dao.AvenaDao                 // optional: sends group_join records to Avena webhook
 	msgRepo  repository.MessageRepository // optional: saves messages to MongoDB in listener mode
 }
 
@@ -364,19 +364,47 @@ func (s *WhatsAppService) handleGroupInfo(evt *events.GroupInfo) {
 	}
 	groupName := s.getGroupName(evt.JID.String())
 	for _, jid := range evt.Join {
-		log.Printf("GROUP JOIN 📩 User %s joined group \"%s\"", jid.String(), groupName)
-		s.saveRecordToAvena(jid.String(), groupName)
+		participant := s.participantToPhone(jid, evt.JID)
+		log.Printf("GROUP JOIN 📩 User %s joined group \"%s\" → phone: %s", jid.String(), groupName, participant)
+		s.saveRecordToAvena(participant, groupName)
 	}
 }
 
 func (s *WhatsAppService) handleJoinedGroup(evt *events.JoinedGroup) {
 	groupName := evt.GroupName.Name
-	sender := "unknown"
-	if evt.Sender != nil {
-		sender = evt.Sender.String()
+	var participant string
+	if evt.SenderPN != nil && !evt.SenderPN.IsEmpty() {
+		participant = evt.SenderPN.User
+	} else if evt.Sender != nil {
+		participant = s.participantToPhone(*evt.Sender, evt.JID)
+	} else {
+		participant = "unknown"
 	}
-	log.Printf("GROUP JOIN 📩 Bot added to group \"%s\" by %s", groupName, sender)
-	s.saveRecordToAvena(sender, groupName)
+	log.Printf("GROUP JOIN 📩 Bot added to group \"%s\" by %s", groupName, participant)
+	s.saveRecordToAvena(participant, groupName)
+}
+
+// participantToPhone returns the phone number for a participant. For LID users, tries GetPNForLID and GetGroupInfo fallback.
+func (s *WhatsAppService) participantToPhone(jid types.JID, groupJID types.JID) string {
+	if jid.Server != types.HiddenUserServer {
+		return jid.User
+	}
+	if s.client == nil || s.client.Store == nil || s.client.Store.LIDs == nil {
+		return jid.User
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if pn, err := s.client.Store.LIDs.GetPNForLID(ctx, jid); err == nil && !pn.IsEmpty() {
+		return pn.User
+	}
+	if !groupJID.IsEmpty() {
+		if _, err := s.client.GetGroupInfo(ctx, groupJID); err == nil {
+			if pn, err := s.client.Store.LIDs.GetPNForLID(ctx, jid); err == nil && !pn.IsEmpty() {
+				return pn.User
+			}
+		}
+	}
+	return jid.User
 }
 
 func (s *WhatsAppService) saveRecordToAvena(participant, groupName string) {
@@ -398,13 +426,12 @@ func (s *WhatsAppService) saveRecordToAvena(participant, groupName string) {
 var participantRegex = regexp.MustCompile(`^(\d{1,3})?(\d+)(?:@.+)?$`)
 
 func parseParticipant(participant string) (lada, phone string) {
-	// Strip @lid or @s.whatsapp.net etc for matching
 	participant = strings.TrimSpace(participant)
-	match := participantRegex.FindStringSubmatch(participant)
+	userPart := regexp.MustCompile(`@.+`).ReplaceAllString(participant, "")
+
+	match := participantRegex.FindStringSubmatch(userPart)
 	if match == nil {
-		phone = strings.TrimSuffix(participant, "@lid")
-		phone = regexp.MustCompile(`@.+`).ReplaceAllString(phone, "")
-		return "", phone
+		return "", userPart
 	}
 	return match[1], match[2]
 }
